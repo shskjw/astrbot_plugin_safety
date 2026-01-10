@@ -1,0 +1,8 @@
+[
+    {
+        "name": "check_interval",
+        "description": "后台巡查频率(秒)，默认3600秒(1小时)",
+        "type": "number",
+        "default": 3600
+    }
+]
