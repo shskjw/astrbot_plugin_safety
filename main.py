@@ -4,6 +4,7 @@ import time
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from shutil import copyfile
 
 from astrbot.api.all import *
 from astrbot.api.event import filter
@@ -19,7 +20,6 @@ class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        # 读取配置
         self.check_interval = config.get("check_interval", 3600)
 
         # --- 加载管理员列表 ---
@@ -42,28 +42,51 @@ class SafetyPlugin(Star):
         # --- 启动后台监控任务 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
-    # ================= 工具方法 =================
+    # ================= 工具方法 (增强版) =================
 
     def _load_users(self) -> dict:
+        """读取用户数据，增加损坏自动修复功能"""
+        if not DATA_FILE.exists():
+            return {}
+
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
+        except json.JSONDecodeError:
+            # 如果文件损坏，自动备份并重置，防止插件卡死
+            logger.error("[Safety] 数据文件 users.json 已损坏！正在备份并重置...")
+            try:
+                backup_path = DATA_FILE.with_suffix(f".bak.{int(time.time())}")
+                copyfile(DATA_FILE, backup_path)
+                logger.warning(f"[Safety] 已备份损坏文件至: {backup_path}")
+            except Exception as e:
+                logger.error(f"[Safety] 备份失败: {e}")
+
+            return {}  # 返回空字典，重新开始
         except Exception as e:
-            logger.error(f"读取用户数据失败: {e}")
+            logger.error(f"[Safety] 读取用户数据未知失败: {e}")
             return {}
 
     def _save_users(self, data: dict):
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        """保存数据"""
+        try:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except TypeError as e:
+            logger.error(f"[Safety] 保存数据时发生类型错误(可能是混入了不可序列化对象): {e}")
+            # 尝试通过简单的日志打印出有问题的数据，方便排查
+            # logger.error(f"Data: {data}")
+        except Exception as e:
+            logger.error(f"[Safety] 保存数据失败: {e}")
 
     def _update_activity(self, user_id: str, group_id: str = None, bot_id: str = None):
         """更新用户活跃时间"""
         users = self._load_users()
         if user_id in users:
             users[user_id]["last_active"] = time.time()
-            users[user_id]["alert_level"] = 0  # 重置报警等级
-            if group_id: users[user_id]["group_id"] = group_id
-            if bot_id: users[user_id]["bot_id"] = bot_id
+            users[user_id]["alert_level"] = 0
+            if group_id: users[user_id]["group_id"] = str(group_id)  # 强制转str
+            if bot_id: users[user_id]["bot_id"] = str(bot_id)  # 强制转str
             self._save_users(users)
             return True
         return False
@@ -81,9 +104,7 @@ class SafetyPlugin(Star):
         if days > 0: parts.append(f"{days}天")
         if hours > 0: parts.append(f"{hours}小时")
         if minutes > 0: parts.append(f"{minutes}分")
-
-        if not parts: return "少于1分钟"
-        return "".join(parts)
+        return "".join(parts) if parts else "少于1分钟"
 
     def _days_to_desc(self, days_float):
         total_minutes = int(days_float * 24 * 60)
@@ -100,8 +121,7 @@ class SafetyPlugin(Star):
 
     @filter.command("安全监控列表")
     async def cmd_admin_check(self, event: AstrMessageEvent):
-        """(管理员) 查看所有用户的监控状态"""
-        sender_id = event.get_sender_id()
+        sender_id = str(event.get_sender_id())  # 强制转str
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足，仅管理员可用。")
             return
@@ -142,9 +162,15 @@ class SafetyPlugin(Star):
 
     @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        group_id = event.get_group_id() if event.message_obj.group_id else ""
-        bot_id = event.bot.id
+        # 1. 强制类型转换，解决 partial 错误
+        user_id = str(event.get_sender_id())
+
+        # 处理 group_id，防止 None
+        raw_group_id = event.get_group_id()
+        group_id = str(raw_group_id) if raw_group_id else ""
+
+        # 处理 bot_id，防止对象或属性异常
+        bot_id = str(event.bot.id) if event.bot else "unknown"
 
         users = self._load_users()
 
@@ -171,7 +197,7 @@ class SafetyPlugin(Star):
 
     @filter.command("配置紧急联系人")
     async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str):
-        user_id = event.get_sender_id()
+        user_id = str(event.get_sender_id())
         users = self._load_users()
 
         if user_id not in users:
@@ -182,13 +208,13 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 联系人必须是QQ号（纯数字）。")
             return
 
-        users[user_id]["emergency_contact"] = contact_qq
+        users[user_id]["emergency_contact"] = str(contact_qq)
         self._save_users(users)
         yield event.plain_result(f"✅ 紧急联系人已设置为: {contact_qq}")
 
     @filter.command("设置失联时间")
     async def cmd_set_days(self, event: AstrMessageEvent, days: str):
-        user_id = event.get_sender_id()
+        user_id = str(event.get_sender_id())
         users = self._load_users()
 
         if user_id not in users:
@@ -211,7 +237,7 @@ class SafetyPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_user_message(self, event: AstrMessageEvent, *args):
         if not event: return
-        user_id = event.get_sender_id()
+        user_id = str(event.get_sender_id())
         self._update_activity(user_id)
 
     # ================= 核心后台逻辑 =================
@@ -259,13 +285,15 @@ class SafetyPlugin(Star):
                 level = info.get("alert_level", 0)
                 max_days = float(info.get("max_missing_days", 3.0))
                 max_seconds = max_days * 86400
+
+                # 获取 Bot 实例
                 bot_id = info.get("bot_id")
                 bot = self.context.get_bot(bot_id)
                 if not bot: continue
 
                 warn_threshold = 86400
 
-                # 阶段 1
+                # 阶段 1: 预警
                 if max_seconds > warn_threshold:
                     if diff > warn_threshold and level < 1:
                         if info.get("group_id"):
@@ -276,7 +304,7 @@ class SafetyPlugin(Star):
                         info["alert_level"] = 1
                         dirty = True
 
-                # 阶段 2
+                # 阶段 2: 紧急
                 if diff > max_seconds and level < 2:
                     contact_id = info.get("emergency_contact")
                     time_desc = self._format_duration(diff)
