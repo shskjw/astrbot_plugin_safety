@@ -2,9 +2,12 @@ import os
 import json
 import time
 import asyncio
+import smtplib
 from datetime import datetime
 from pathlib import Path
 from shutil import copyfile
+from email.mime.text import MIMEText
+from email.header import Header
 
 from astrbot.api.all import *
 from astrbot.api.event import filter
@@ -15,14 +18,21 @@ DATA_DIR = Path("data/plugin_data/astrbot_plugin_safety")
 DATA_FILE = DATA_DIR / "users.json"
 
 
-@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.0")
+@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.5")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        # --- 加载管理员列表 ---
+        # --- 内存缓存 ---
+        self.cache = {}
+        self.is_dirty = False
+
+        # --- Bot 实例缓存池 ---
+        self.connected_bots = {}
+
+        # --- 加载管理员 ---
         self.admins = []
         global_config = context.get_config()
         if global_config and "admins_id" in global_config:
@@ -30,76 +40,135 @@ class SafetyPlugin(Star):
                 if str(admin_id).isdigit():
                     self.admins.append(str(admin_id))
 
-        logger.info(f"[Safety] 加载管理员列表: {self.admins}")
-
-        # --- 初始化数据文件 ---
+        # --- 初始化 ---
         if not DATA_DIR.exists():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-        if not DATA_FILE.exists():
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump({}, f)
 
-        # --- 启动后台监控任务 ---
+        self._sync_init_load()
+
+        # --- 启动后台监控 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
-    # ================= 工具方法 (增强版) =================
+    # ================= 核心：Bot 收集 =================
+    def _record_bot(self, bot):
+        if bot and hasattr(bot, 'id'):
+            self.connected_bots[str(bot.id)] = bot
 
-    def _load_users(self) -> dict:
-        """读取用户数据，增加损坏自动修复功能"""
+    def _get_bot_instance(self, bot_id: str):
+        if bot_id in self.connected_bots:
+            return self.connected_bots[bot_id]
+        if len(self.connected_bots) == 1:
+            return list(self.connected_bots.values())[0]
+        return None
+
+    # ================= 核心：数据 I/O =================
+    def _sync_init_load(self):
         if not DATA_FILE.exists():
-            return {}
-
+            self._init_empty_file()
+            return
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            # 如果文件损坏，自动备份并重置，防止插件卡死
-            logger.error("[Safety] 数据文件 users.json 已损坏！正在备份并重置...")
-            try:
-                backup_path = DATA_FILE.with_suffix(f".bak.{int(time.time())}")
-                copyfile(DATA_FILE, backup_path)
-                logger.warning(f"[Safety] 已备份损坏文件至: {backup_path}")
-            except Exception as e:
-                logger.error(f"[Safety] 备份失败: {e}")
-
-            return {}  # 返回空字典，重新开始
+                self.cache = json.load(f)
         except Exception as e:
-            logger.error(f"[Safety] 读取用户数据未知失败: {e}")
-            return {}
+            logger.error(f"[Safety] 数据文件读取失败: {e}")
+            self._backup_and_reset()
 
-    def _save_users(self, data: dict):
-        """保存数据"""
+    def _init_empty_file(self):
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        self.cache = {}
+
+    def _backup_and_reset(self):
         try:
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except TypeError as e:
-            logger.error(f"[Safety] 保存数据时发生类型错误(可能是混入了不可序列化对象): {e}")
-            # 尝试通过简单的日志打印出有问题的数据，方便排查
-            # logger.error(f"Data: {data}")
-        except Exception as e:
-            logger.error(f"[Safety] 保存数据失败: {e}")
+            timestamp = int(time.time())
+            backup_path = DATA_FILE.with_suffix(f".bak.{timestamp}")
+            if DATA_FILE.exists():
+                copyfile(DATA_FILE, backup_path)
+        except Exception:
+            pass
+        self._init_empty_file()
 
-    def _update_activity(self, user_id: str, group_id: str = None, bot_id: str = None):
-        """更新用户活跃时间"""
-        users = self._load_users()
-        if user_id in users:
-            users[user_id]["last_active"] = time.time()
-            users[user_id]["alert_level"] = 0
-            if group_id: users[user_id]["group_id"] = str(group_id)  # 强制转str
-            if bot_id: users[user_id]["bot_id"] = str(bot_id)  # 强制转str
-            self._save_users(users)
+    async def _async_save_users(self):
+        if not self.cache: return
+        data_to_save = self.cache.copy()
+        try:
+            await asyncio.to_thread(self._thread_write_task, data_to_save)
+            self.is_dirty = False
+        except Exception as e:
+            logger.error(f"[Safety] 保存失败: {e}")
+
+    def _thread_write_task(self, data):
+        temp_file = DATA_FILE.with_suffix(".tmp")
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_file, DATA_FILE)
+        except Exception as e:
+            logger.error(f"[Safety] 写入失败: {e}")
+
+    # ================= 核心：邮件发送模块 =================
+
+    def _get_target_email(self, info: dict):
+        # 优先用户绑定，其次紧急联系人QQ
+        custom_email = info.get("email")
+        if custom_email and "@" in custom_email:
+            return custom_email
+        contact_qq = info.get("emergency_contact")
+        if contact_qq and contact_qq.isdigit():
+            return f"{contact_qq}@qq.com"
+        return None
+
+    async def _async_send_email(self, user_info: dict, subject: str, body: str):
+        target_email = self._get_target_email(user_info)
+        if not target_email:
+            return
+
+        smtp_conf = user_info.get("smtp_override", {})
+        host = smtp_conf.get("host", self.config.get("smtp_host", "smtp.qiye.aliyun.com"))
+        port = smtp_conf.get("port", self.config.get("smtp_port", 465))
+        user = smtp_conf.get("user", self.config.get("smtp_user", "are-you-still-alive@x.mizhoubaobei.top"))
+        password = smtp_conf.get("pass", self.config.get("smtp_pass", "ZM13199@%"))
+
+        try:
+            await asyncio.to_thread(self._thread_send_email, host, port, user, password, target_email, subject, body)
+            logger.info(f"[Safety] 邮件已发送至 {target_email}")
+        except smtplib.SMTPAuthenticationError:
+            logger.error(f"[Safety] 邮件认证失败！请检查配置的账号({user})和密码。")
+        except Exception as e:
+            logger.error(f"[Safety] 邮件发送失败 ({target_email}): {e}")
+
+    def _thread_send_email(self, host, port, user, password, to_addr, subject, body):
+        msg = MIMEText(body, 'plain', 'utf-8')
+        msg['From'] = user
+        msg['To'] = to_addr
+        msg['Subject'] = Header(subject, 'utf-8')
+
+        try:
+            server = smtplib.SMTP_SSL(host, int(port), timeout=10)
+            server.login(user, password)
+            server.sendmail(user, [to_addr], msg.as_string())
+            server.quit()
+        except Exception as e:
+            raise e
+
+    # ================= 业务逻辑 =================
+
+    def _update_activity_memory(self, user_id: str, group_id: str = None, bot_id: str = None):
+        user_id = str(user_id)
+        if user_id in self.cache:
+            if group_id: self.cache[user_id]["group_id"] = str(group_id)
+            if bot_id: self.cache[user_id]["bot_id"] = str(bot_id)
+            self.cache[user_id]["last_active"] = time.time()
+            self.cache[user_id]["alert_level"] = 0
+            self.is_dirty = True
             return True
         return False
-
-    def _format_time(self, timestamp):
-        return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
     def _format_duration(self, seconds):
         days = int(seconds // 86400)
         remaining = seconds % 86400
         hours = int(remaining // 3600)
         minutes = int((remaining % 3600) // 60)
-
         parts = []
         if days > 0: parts.append(f"{days}天")
         if hours > 0: parts.append(f"{hours}小时")
@@ -111,136 +180,274 @@ class SafetyPlugin(Star):
         d = total_minutes // 1440
         h = (total_minutes % 1440) // 60
         m = total_minutes % 60
-        desc = f"{days_float}天 ("
-        if d > 0: desc += f"{d}天"
-        if h > 0: desc += f"{h}小时"
-        desc += f"{m}分钟)"
-        return desc
+        return f"{days_float}天 ({d}天{h}小时{m}分)"
+
+    def _get_msg_content(self, info: dict, msg_type: str, default_text: str):
+        custom = ""
+        if msg_type == "warn":
+            custom = info.get("custom_warn_msg", "")
+        elif msg_type == "emerg":
+            custom = info.get("custom_emerg_msg", "")
+        if custom and custom.strip():
+            return custom
+        return default_text
+
+    # ================= 用户指令 =================
+
+    @filter.command("设置一阶段")
+    async def cmd_set_warn_msg(self, event: AstrMessageEvent, *args):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+
+        if user_id not in self.cache:
+            yield event.plain_result("❌ 请先发送 /注册又活一天")
+            return
+
+        message = " ".join(args).strip()
+        if not message:
+            current = self.cache[user_id].get("custom_warn_msg", "（默认）")
+            if not current: current = "（默认）"
+            yield event.plain_result(f"📝 当前一阶段(预警)话术：\n{current}\n\n如需修改，请在指令后加上新话术。")
+            return
+
+        self.cache[user_id]["custom_warn_msg"] = message
+        await self._async_save_users()
+        yield event.plain_result(f"✅ 一阶段预警话术已更新！")
+
+    @filter.command("设置二阶段")
+    async def cmd_set_emerg_msg(self, event: AstrMessageEvent, *args):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+
+        if user_id not in self.cache:
+            yield event.plain_result("❌ 请先发送 /注册又活一天")
+            return
+
+        message = " ".join(args).strip()
+        if not message:
+            current = self.cache[user_id].get("custom_emerg_msg", "（默认）")
+            if not current: current = "（默认）"
+            yield event.plain_result(f"📝 当前二阶段(报警)话术：\n{current}\n\n如需修改，请在指令后加上新话术。")
+            return
+
+        self.cache[user_id]["custom_emerg_msg"] = message
+        await self._async_save_users()
+        yield event.plain_result(f"✅ 二阶段报警话术已更新！")
+
+    @filter.command("绑定邮箱")
+    async def cmd_bind_email(self, event: AstrMessageEvent, email: str):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+
+        if user_id not in self.cache:
+            yield event.plain_result("❌ 请先发送 /注册又活一天")
+            return
+
+        if "@" not in email or "." not in email:
+            yield event.plain_result("❌ 邮箱格式不正确。")
+            return
+
+        self.cache[user_id]["email"] = str(email)
+        await self._async_save_users()
+
+        asyncio.create_task(self._async_send_email(
+            self.cache[user_id],
+            "【防失联卫士】邮箱绑定测试",
+            f"您好，用户 {user_id} 已成功绑定此邮箱。"
+        ))
+
+        yield event.plain_result(f"✅ 邮箱已绑定: {email}")
+
+    # ================= 常规指令 =================
+
+    @filter.command("注册又活一天")
+    async def cmd_register(self, event: AstrMessageEvent):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+        raw_group_id = event.get_group_id()
+        group_id = str(raw_group_id) if raw_group_id else ""
+        bot_id = str(event.bot.id) if (hasattr(event, 'bot') and event.bot) else "unknown"
+
+        if user_id not in self.cache:
+            self.cache[user_id] = {
+                "user_id": user_id,
+                "bot_id": bot_id,
+                "group_id": group_id,
+                "emergency_contact": "",
+                "email": "",
+                "max_missing_days": 3.0,
+                "last_active": time.time(),
+                "alert_level": 0,
+                "custom_warn_msg": "",
+                "custom_emerg_msg": ""
+            }
+            msg = "✅ 注册成功！\n请发送 /配置紧急联系人 [QQ号]"
+        else:
+            self.cache[user_id]["last_active"] = time.time()
+            self.cache[user_id]["alert_level"] = 0
+            self.cache[user_id]["bot_id"] = bot_id
+            if group_id: self.cache[user_id]["group_id"] = group_id
+            msg = "✅ 打卡成功！计时器已重置。"
+
+        await self._async_save_users()
+        yield event.plain_result(msg)
+
+    @filter.command("配置紧急联系人")
+    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+        if user_id not in self.cache:
+            yield event.plain_result("❌ 请先发送 /注册又活一天")
+            return
+        if not contact_qq.isdigit():
+            yield event.plain_result("❌ QQ号必须是纯数字")
+            return
+        self.cache[user_id]["emergency_contact"] = str(contact_qq)
+        await self._async_save_users()
+        yield event.plain_result(f"✅ 紧急联系人已更新")
+
+    @filter.command("设置失联时间")
+    async def cmd_set_days(self, event: AstrMessageEvent, days: str):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        user_id = str(event.get_sender_id())
+        if user_id not in self.cache:
+            yield event.plain_result("❌ 请先发送 /注册又活一天")
+            return
+        try:
+            days_float = float(days)
+            if days_float <= 0: raise ValueError
+        except ValueError:
+            yield event.plain_result("❌ 请输入有效数字")
+            return
+        self.cache[user_id]["max_missing_days"] = days_float
+        await self._async_save_users()
+        yield event.plain_result(f"✅ 设置成功。阈值: {self._days_to_desc(days_float)}")
 
     # ================= 管理员指令 =================
 
+    @filter.command("重载安全配置")
+    async def cmd_reload_config(self, event: AstrMessageEvent):
+        sender_id = str(event.get_sender_id())
+        if sender_id not in self.admins:
+            yield event.plain_result("❌ 权限不足。")
+            return
+        self._sync_init_load()
+        yield event.plain_result(f"✅ 配置文件已重载！当前缓存 {len(self.cache)} 个用户。")
+
     @filter.command("安全监控列表")
     async def cmd_admin_check(self, event: AstrMessageEvent):
-        sender_id = str(event.get_sender_id())  # 强制转str
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        sender_id = str(event.get_sender_id())
         if sender_id not in self.admins:
-            yield event.plain_result("❌ 权限不足，仅管理员可用。")
-            return
-
-        users = self._load_users()
-        if not users:
-            yield event.plain_result("📂 当前没有正在监控的用户。")
+            yield event.plain_result("❌ 权限不足。")
             return
 
         msg_lines = ["📋 [管理员] 全员安全监控报表", "----------------"]
         now = time.time()
 
-        for uid, info in users.items():
-            last_active = info.get("last_active", 0)
-            diff = now - last_active
+        for uid, info in self.cache.items():
+            diff = now - info.get("last_active", 0)
             level = info.get("alert_level", 0)
-            max_days = float(info.get("max_missing_days", 3))
-            contact = info.get("emergency_contact", "未设置")
+            target_mail = self._get_target_email(info) or "无"
 
             if level == 0:
                 status = "🟢 正常"
             elif level == 1:
-                status = "🟡 警告中"
+                status = "🟡 警告"
             else:
-                status = "🔴 已失联"
+                status = "🔴 失联"
 
             line = (
                 f"{status} 用户: {uid}\n"
-                f"   ├ 失联时长: {self._format_duration(diff)}\n"
-                f"   ├ 设定阈值: {max_days}天\n"
-                f"   └ 紧急联系: {contact}"
+                f"   ├ 失联: {self._format_duration(diff)}\n"
+                f"   ├ 邮箱: {target_mail}\n"
+                f"   └ 联系人: {info.get('emergency_contact', '无')}"
             )
             msg_lines.append(line)
 
         yield event.plain_result("\n".join(msg_lines))
 
-    # ================= 用户指令交互 =================
+    # --- 测试指令 (重写：全通道发送) ---
+    @filter.command("发送测试")
+    async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
+        if hasattr(event, 'bot'): self._record_bot(event.bot)
+        sender_id = str(event.get_sender_id())
+        if sender_id not in self.admins:
+            yield event.plain_result("❌ 权限不足。")
+            return
 
-    @filter.command("注册又活一天")
-    async def cmd_register(self, event: AstrMessageEvent):
-        # 1. 强制类型转换，解决 partial 错误
-        user_id = str(event.get_sender_id())
+        target_id = str(target_qq) if target_qq else sender_id
+        if target_id not in self.cache:
+            yield event.plain_result(f"❌ 用户 {target_id} 未注册。")
+            return
 
-        # 处理 group_id，防止 None
-        raw_group_id = event.get_group_id()
-        group_id = str(raw_group_id) if raw_group_id else ""
+        info = self.cache[target_id]
+        bot = getattr(event, 'bot', None)
+        if not bot: bot = self._get_bot_instance(info.get("bot_id"))
 
-        # 处理 bot_id，防止对象或属性异常
-        bot_id = str(event.bot.id) if event.bot else "unknown"
+        yield event.plain_result(f"🚀 开始全通道测试 (用户 {target_id})...")
 
-        users = self._load_users()
+        msg_text = self._get_msg_content(info, "emerg", f"🚨 [测试] 用户 {target_id} 正在测试失联报警。")
 
-        if user_id not in users:
-            users[user_id] = {
-                "user_id": user_id,
-                "bot_id": bot_id,
-                "group_id": group_id,
-                "emergency_contact": "",
-                "max_missing_days": 3.0,
-                "last_active": time.time(),
-                "alert_level": 0
-            }
-            msg = "✅ 注册成功！监控已启动。\n请尽快发送 /配置紧急联系人 [QQ号] 完善安全设置。"
+        # 1. 发送邮件 (目标: 绑定邮箱 or 紧急联系人QQ邮箱)
+        target_email = self._get_target_email(info)
+        if target_email:
+            asyncio.create_task(self._async_send_email(
+                info, "【防失联卫士】报警系统测试", f"测试邮件。\n报警内容：{msg_text}"
+            ))
+            yield event.plain_result(f"📧 邮件已发送 -> {target_email}")
         else:
-            users[user_id]["last_active"] = time.time()
-            users[user_id]["alert_level"] = 0
-            users[user_id]["bot_id"] = bot_id
-            if group_id: users[user_id]["group_id"] = group_id
-            msg = "✅ 打卡成功！计时器已重置。"
+            yield event.plain_result(f"⚠️ 无有效邮箱，跳过邮件发送。")
 
-        self._save_users(users)
-        yield event.plain_result(msg)
-
-    @filter.command("配置紧急联系人")
-    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str):
-        user_id = str(event.get_sender_id())
-        users = self._load_users()
-
-        if user_id not in users:
-            yield event.plain_result("❌ 请先发送 /注册又活一天 开启功能。")
+        if not bot:
+            yield event.plain_result("❌ 找不到Bot，无法发送QQ消息。")
             return
 
-        if not contact_qq.isdigit():
-            yield event.plain_result("❌ 联系人必须是QQ号（纯数字）。")
-            return
+        # 2. 私聊 -> 用户本人
+        await self._send_private_raw(bot, target_id, msg_text + "\n(测试：发给用户)")
+        yield event.plain_result(f"✅ 私聊已发送 -> 用户本人")
 
-        users[user_id]["emergency_contact"] = str(contact_qq)
-        self._save_users(users)
-        yield event.plain_result(f"✅ 紧急联系人已设置为: {contact_qq}")
+        # 3. 处理紧急联系人
+        contact_id = info.get("emergency_contact")
+        group_id = info.get("group_id")
 
-    @filter.command("设置失联时间")
-    async def cmd_set_days(self, event: AstrMessageEvent, days: str):
-        user_id = str(event.get_sender_id())
-        users = self._load_users()
+        if contact_id:
+            # 3.1 私聊 -> 紧急联系人
+            await self._send_private_raw(bot, contact_id, msg_text + "\n(测试：发给联系人)")
+            yield event.plain_result(f"✅ 私聊已发送 -> 紧急联系人")
 
-        if user_id not in users:
-            yield event.plain_result("❌ 请先发送 /注册又活一天 开启功能。")
-            return
-
-        try:
-            days_float = float(days)
-            if days_float <= 0: raise ValueError
-        except ValueError:
-            yield event.plain_result("❌ 输入无效。请输入数字，例如 3 或 0.5")
-            return
-
-        users[user_id]["max_missing_days"] = days_float
-        self._save_users(users)
-        yield event.plain_result(f"✅ 设置成功。若 {self._days_to_desc(days_float)} 无消息，将联系紧急联系人。")
+            # 3.2 群聊 -> 同时艾特 用户 和 联系人
+            if group_id:
+                # 构造包含两个 At 的消息链
+                chain = [
+                    {"type": "at", "data": {"qq": target_id}},
+                    {"type": "text", "data": {"text": " "}},
+                    {"type": "at", "data": {"qq": contact_id}},
+                    {"type": "text", "data": {"text": f" {msg_text}"}}
+                ]
+                try:
+                    await bot.send_group_msg(group_id=int(group_id), message=chain)
+                    yield event.plain_result(f"✅ 群聊已发送 -> @用户 @联系人")
+                except Exception as e:
+                    logger.error(f"[Safety] 测试群发失败: {e}")
+                    yield event.plain_result(f"❌ 群聊发送失败")
+        else:
+            yield event.plain_result(f"⚠️ 未设置紧急联系人，跳过联系人相关测试。")
 
     # ================= 被动监听 =================
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_user_message(self, event: AstrMessageEvent, *args):
-        if not event: return
-        user_id = str(event.get_sender_id())
-        self._update_activity(user_id)
+        if not event or not hasattr(event, 'bot') or event.bot is None:
+            return
+        try:
+            self._record_bot(event.bot)
+            user_id = str(event.get_sender_id())
+            self._update_activity_memory(user_id)
+        except Exception:
+            pass
 
-    # ================= 核心后台逻辑 =================
+    # ================= 后台任务 =================
 
     async def _send_private_raw(self, bot, user_id, text):
         try:
@@ -248,8 +455,9 @@ class SafetyPlugin(Star):
                 user_id=int(user_id),
                 message=[{"type": "text", "data": {"text": text}}]
             )
+            logger.info(f"[Safety] 私聊发送成功 -> {user_id}")
         except Exception as e:
-            logger.error(f"[Safety] 私聊发送失败: {e}")
+            logger.error(f"[Safety] 私聊失败: {e}")
 
     async def _send_group_at_raw(self, bot, group_id, user_id, text):
         try:
@@ -260,70 +468,95 @@ class SafetyPlugin(Star):
                     {"type": "text", "data": {"text": f" {text}"}}
                 ]
             )
+            logger.info(f"[Safety] 群聊发送成功 -> 群{group_id} @{user_id}")
         except Exception as e:
-            logger.error(f"[Safety] 群聊发送失败: {e}")
+            logger.error(f"[Safety] 群聊失败: {e}")
 
     async def _check_user_in_group(self, bot, group_id, user_id):
         if not group_id: return False
         try:
-            member = await bot.get_group_member_info(group_id=int(group_id), user_id=int(user_id))
-            return member is not None
+            m = await bot.get_group_member_info(group_id=int(group_id), user_id=int(user_id))
+            return m is not None
         except:
             return False
 
     async def _monitor_loop(self):
+        logger.info(f"[Safety] 监控启动，周期: {self.check_interval}s")
         while True:
             await asyncio.sleep(self.check_interval)
 
-            users = self._load_users()
-            now = time.time()
-            dirty = False
+            if self.is_dirty:
+                await self._async_save_users()
 
-            for uid, info in users.items():
+            now = time.time()
+            data_changed = False
+
+            for uid in list(self.cache.keys()):
+                info = self.cache[uid]
                 last = info.get("last_active", now)
                 diff = now - last
                 level = info.get("alert_level", 0)
                 max_days = float(info.get("max_missing_days", 3.0))
                 max_seconds = max_days * 86400
 
-                # 获取 Bot 实例
-                bot_id = info.get("bot_id")
-                bot = self.context.get_bot(bot_id)
-                if not bot: continue
-
+                bot = self._get_bot_instance(info.get("bot_id"))
                 warn_threshold = 86400
 
-                # 阶段 1: 预警
+                # --- 阶段 1: 预警 (目标：用户) ---
                 if max_seconds > warn_threshold:
                     if diff > warn_threshold and level < 1:
-                        if info.get("group_id"):
-                            await self._send_group_at_raw(bot, info["group_id"], uid,
-                                                          "⚠️ 你已经24小时没说话了，还活着吗？请冒个泡！")
-                        await self._send_private_raw(bot, uid,
-                                                     "⚠️ [安全提醒] 你已经一天没说话了，请回复任意消息报平安。")
-                        info["alert_level"] = 1
-                        dirty = True
 
-                # 阶段 2: 紧急
+                        msg_text = self._get_msg_content(info, "warn",
+                                                         "⚠️ [安全提醒] 你已24小时没冒泡了，请回复消息报平安。")
+
+                        if bot:
+                            # 动作：群@用户 + 私聊用户
+                            if info.get("group_id"):
+                                await self._send_group_at_raw(bot, info["group_id"], uid, msg_text)
+                            await self._send_private_raw(bot, uid, msg_text)
+
+                        info["alert_level"] = 1
+                        data_changed = True
+
+                # --- 阶段 2: 紧急 (目标：紧急联系人) ---
                 if diff > max_seconds and level < 2:
+                    logger.info(f"[Safety] 触发紧急报警 -> 用户 {uid}")
+
                     contact_id = info.get("emergency_contact")
+
                     time_desc = self._format_duration(diff)
 
-                    if contact_id:
-                        msg_text = f"🚨 [紧急求助] 用户 {uid} 已失联 {time_desc} (超过设定阈值)！"
-                        is_in_group = await self._check_user_in_group(bot, info["group_id"], contact_id)
+                    default_emerg = self.config.get("default_emerg_msg",
+                                                    "🚨 [紧急求助] 用户 {uid} 已失联 {time}，请尝试联系！")
 
-                        if is_in_group:
-                            await self._send_group_at_raw(bot, info["group_id"], contact_id,
-                                                          f"警告：用户 {uid} 已失联，请尝试联系！")
-                            await self._send_private_raw(bot, contact_id, msg_text + " (已在群内同步提醒)")
+                    raw_msg = self._get_msg_content(info, "emerg", default_emerg)
+
+                    msg_text = raw_msg.replace("{uid}", uid).replace("{time}", time_desc)
+
+                    # 1. 发邮件 (目标：优先自定义，否则联系人QQ邮箱)
+                    if self._get_target_email(info):
+                        await self._async_send_email(info, f"【紧急】用户 {uid} 失联警报",
+                                                     f"系统检测到用户已失联 {time_desc}。\n\n报警内容：\n{msg_text}")
+
+                    if bot:
+                        # 2. 动作：私聊 -> 用户本人 (兜底通知)
+                        await self._send_private_raw(bot, uid, msg_text + "\n(已触发紧急联系流程)")
+
+                        # 3. 动作：联系人
+                        if contact_id:
+                            # 3.1 私聊 -> 联系人
+                            await self._send_private_raw(bot, contact_id, msg_text + "\n(已在群内同步提醒)")
+
+                            # 3.2 群聊 -> @联系人 (严格按照需求，只@联系人)
+                            if info.get("group_id"):
+                                is_in_group = await self._check_user_in_group(bot, info.get("group_id"), contact_id)
+                                if is_in_group:
+                                    await self._send_group_at_raw(bot, info["group_id"], contact_id, msg_text)
                         else:
-                            await self._send_private_raw(bot, contact_id, msg_text + " (请尝试通过电话联系他)")
-                    else:
-                        await self._send_private_raw(bot, uid, "🚨 [最终警告] 已达到失联阈值，但未设置紧急联系人。")
+                            await self._send_private_raw(bot, uid, "🚨 [最终警告] 你未设置紧急联系人。")
 
                     info["alert_level"] = 2
-                    dirty = True
+                    data_changed = True
 
-            if dirty:
-                self._save_users(users)
+            if data_changed:
+                await self._async_save_users()

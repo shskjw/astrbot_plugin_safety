@@ -3,5 +3,35 @@
     "description": "后台巡查频率(秒)，默认3600秒(1小时)",
     "type": "int",
     "default": 3600
+  },
+  "default_warn_msg": {
+    "description": "全局默认一阶段(预警)话术",
+    "type": "string",
+    "default": "⚠️ [安全提醒] 你已24小时没冒泡了，请回复消息报平安。"
+  },
+  "default_emerg_msg": {
+    "description": "全局默认二阶段(报警)话术。支持变量: {uid}=用户ID, {time}=失联时长",
+    "type": "string",
+    "default": "🚨 [紧急求助] 用户 {uid} 已失联 {time}，请尝试联系！"
+  },
+  "smtp_host": {
+    "description": "SMTP服务器地址",
+    "type": "string",
+    "default": "smtp.qiye.aliyun.com"
+  },
+  "smtp_port": {
+    "description": "SMTP端口 (SSL加密)",
+    "type": "int",
+    "default": 465
+  },
+  "smtp_user": {
+    "description": "SMTP发件人邮箱账号",
+    "type": "string",
+    "default": "are-you-still-alive@x.mizhoubaobei.top"
+  },
+  "smtp_pass": {
+    "description": "SMTP发件人密码/授权码",
+    "type": "string",
+    "default": "ZM13199@%"
   }
 }
