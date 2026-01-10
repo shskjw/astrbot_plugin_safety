@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from astrbot.api.all import *
-from astrbot.api.star import event_handler, Star, register  # 从 star 模块导入 event_handler
+from astrbot.api.event import filter
 from astrbot.api import logger
 
 # 数据存储路径
@@ -14,14 +14,15 @@ DATA_DIR = Path("data/plugin_data/astrbot_plugin_safety")
 DATA_FILE = DATA_DIR / "users.json"
 
 
-@register("safety_guard", "YourName", "防失联卫士", "1.0.0")
+@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.0")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
+        # 读取配置
         self.check_interval = config.get("check_interval", 3600)
 
-        # --- 加载管理员 ---
+        # --- 加载管理员列表 ---
         self.admins = []
         global_config = context.get_config()
         if global_config and "admins_id" in global_config:
@@ -38,7 +39,7 @@ class SafetyPlugin(Star):
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump({}, f)
 
-        # --- 启动后台监控 ---
+        # --- 启动后台监控任务 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
     # ================= 工具方法 =================
@@ -68,11 +69,9 @@ class SafetyPlugin(Star):
         return False
 
     def _format_time(self, timestamp):
-        """将时间戳转换为可读格式"""
         return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
     def _format_duration(self, seconds):
-        """将秒数转换为 天/小时/分钟"""
         days = int(seconds // 86400)
         remaining = seconds % 86400
         hours = int(remaining // 3600)
@@ -87,12 +86,10 @@ class SafetyPlugin(Star):
         return "".join(parts)
 
     def _days_to_desc(self, days_float):
-        """把 0.5 天 这种浮点数转为中文描述"""
         total_minutes = int(days_float * 24 * 60)
         d = total_minutes // 1440
         h = (total_minutes % 1440) // 60
         m = total_minutes % 60
-
         desc = f"{days_float}天 ("
         if d > 0: desc += f"{d}天"
         if h > 0: desc += f"{h}小时"
@@ -101,11 +98,10 @@ class SafetyPlugin(Star):
 
     # ================= 管理员指令 =================
 
-    @command("安全监控列表")
+    @filter.command("安全监控列表")
     async def cmd_admin_check(self, event: AstrMessageEvent):
         """(管理员) 查看所有用户的监控状态"""
         sender_id = event.get_sender_id()
-
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足，仅管理员可用。")
             return
@@ -125,7 +121,6 @@ class SafetyPlugin(Star):
             max_days = float(info.get("max_missing_days", 3))
             contact = info.get("emergency_contact", "未设置")
 
-            # 状态可视化
             if level == 0:
                 status = "🟢 正常"
             elif level == 1:
@@ -145,9 +140,8 @@ class SafetyPlugin(Star):
 
     # ================= 用户指令交互 =================
 
-    @command("注册又活一天")
+    @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
-        """用户注册或手动打卡"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id() if event.message_obj.group_id else ""
         bot_id = event.bot.id
@@ -175,9 +169,8 @@ class SafetyPlugin(Star):
         self._save_users(users)
         yield event.plain_result(msg)
 
-    @command("配置紧急联系人")
+    @filter.command("配置紧急联系人")
     async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str):
-        """配置紧急联系人QQ"""
         user_id = event.get_sender_id()
         users = self._load_users()
 
@@ -193,9 +186,8 @@ class SafetyPlugin(Star):
         self._save_users(users)
         yield event.plain_result(f"✅ 紧急联系人已设置为: {contact_qq}")
 
-    @command("设置失联时间")
+    @filter.command("设置失联时间")
     async def cmd_set_days(self, event: AstrMessageEvent, days: str):
-        """自定义最大失联天数 (支持小数，如 0.5 表示12小时)"""
         user_id = event.get_sender_id()
         users = self._load_users()
 
@@ -205,24 +197,20 @@ class SafetyPlugin(Star):
 
         try:
             days_float = float(days)
-            if days_float <= 0:
-                raise ValueError
+            if days_float <= 0: raise ValueError
         except ValueError:
             yield event.plain_result("❌ 输入无效。请输入数字，例如 3 或 0.5")
             return
 
         users[user_id]["max_missing_days"] = days_float
         self._save_users(users)
-
-        time_desc = self._days_to_desc(days_float)
-        yield event.plain_result(f"✅ 设置成功。若 {time_desc} 无消息，将联系紧急联系人。")
+        yield event.plain_result(f"✅ 设置成功。若 {self._days_to_desc(days_float)} 无消息，将联系紧急联系人。")
 
     # ================= 被动监听 =================
 
-    # 这里的 @event_handler 应该可以正常工作了
-    @event_handler()
-    async def on_user_message(self, event: AstrMessageEvent):
-        """监听所有消息，如果是注册用户，悄悄更新时间"""
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_user_message(self, event: AstrMessageEvent, *args):
+        if not event: return
         user_id = event.get_sender_id()
         self._update_activity(user_id)
 
@@ -258,7 +246,6 @@ class SafetyPlugin(Star):
             return False
 
     async def _monitor_loop(self):
-        """后台定时任务"""
         while True:
             await asyncio.sleep(self.check_interval)
 
@@ -270,18 +257,15 @@ class SafetyPlugin(Star):
                 last = info.get("last_active", now)
                 diff = now - last
                 level = info.get("alert_level", 0)
-
                 max_days = float(info.get("max_missing_days", 3.0))
                 max_seconds = max_days * 86400
-
                 bot_id = info.get("bot_id")
                 bot = self.context.get_bot(bot_id)
                 if not bot: continue
 
-                # 阶段 1: 24小时警告
                 warn_threshold = 86400
 
-                # 如果设定时间大于24小时，才执行预警
+                # 阶段 1
                 if max_seconds > warn_threshold:
                     if diff > warn_threshold and level < 1:
                         if info.get("group_id"):
@@ -292,7 +276,7 @@ class SafetyPlugin(Star):
                         info["alert_level"] = 1
                         dirty = True
 
-                # 阶段 2: 紧急
+                # 阶段 2
                 if diff > max_seconds and level < 2:
                     contact_id = info.get("emergency_contact")
                     time_desc = self._format_duration(diff)
