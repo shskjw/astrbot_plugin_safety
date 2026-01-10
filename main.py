@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from astrbot.api.all import *
-from astrbot.api.event import event_handler
+from astrbot.api.star import event_handler, Star, register  # 从 star 模块导入 event_handler
 from astrbot.api import logger
 
 # 数据存储路径
@@ -14,7 +14,7 @@ DATA_DIR = Path("data/plugin_data/astrbot_plugin_safety")
 DATA_FILE = DATA_DIR / "users.json"
 
 
-@register("safety_guard", "YourName", "防失联卫士", "1.3.1")
+@register("safety_guard", "YourName", "防失联卫士", "1.0.0")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -219,6 +219,7 @@ class SafetyPlugin(Star):
 
     # ================= 被动监听 =================
 
+    # 这里的 @event_handler 应该可以正常工作了
     @event_handler()
     async def on_user_message(self, event: AstrMessageEvent):
         """监听所有消息，如果是注册用户，悄悄更新时间"""
@@ -280,6 +281,7 @@ class SafetyPlugin(Star):
                 # 阶段 1: 24小时警告
                 warn_threshold = 86400
 
+                # 如果设定时间大于24小时，才执行预警
                 if max_seconds > warn_threshold:
                     if diff > warn_threshold and level < 1:
                         if info.get("group_id"):
