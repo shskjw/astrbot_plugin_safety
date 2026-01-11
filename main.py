@@ -14,6 +14,7 @@ from email.utils import formataddr, make_msgid, formatdate
 
 from astrbot.api.all import *
 from astrbot.api.event import filter
+from astrbot.api.star import StarTools
 from astrbot.api import logger
 
 
@@ -24,11 +25,7 @@ class SafetyPlugin(Star):
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        # --- 1. 数据持久化路径 (动态构建) ---
-        # 获取当前插件文件夹名称 (例如 astrbot_plugin_safety)
-        plugin_folder_name = Path(__file__).parent.name
-        # 构建标准数据目录: data/plugin_data/astrbot_plugin_safety
-        self.data_dir = Path("data/plugin_data") / plugin_folder_name
+        self.data_dir = Path(StarTools.get_data_dir("astrbot_plugin_safety"))
         self.data_file = self.data_dir / "users.json"
 
         # --- 内存缓存 ---
@@ -69,11 +66,12 @@ class SafetyPlugin(Star):
 
     # ================= 核心：数据 I/O =================
     def _sync_init_load(self):
-        """同步加载数据"""
+        """同步加载数据 (初始化时或通过线程池调用)"""
         if not self.data_file.exists():
             self._init_empty_file()
             return
         try:
+            # 这里的同步读取 open() 在 reload 时需配合 to_thread 使用
             with open(self.data_file, "r", encoding="utf-8") as f:
                 self.cache = json.load(f)
         except Exception as e:
