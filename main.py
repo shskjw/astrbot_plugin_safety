@@ -300,7 +300,7 @@ class SafetyPlugin(Star):
                 "custom_warn_msg": "",
                 "custom_emerg_msg": ""
             }
-            msg = "✅ 注册成功！\n请发送 /配置紧急联系人 [QQ号]\n(可选) /绑定邮箱"
+            msg = "✅ 注册成功！\n请发送 /配置紧急联系人 [QQ号]\n(可选) /绑定邮箱（默认qq邮箱）\n/设置失联时间 x天"
         else:
             self.cache[user_id]["last_active"] = time.time()
             self.cache[user_id]["alert_level"] = 0
