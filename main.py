@@ -25,26 +25,39 @@ class SafetyPlugin(Star):
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        # 获取插件标准数据存储目录
-        self.data_dir = Path(StarTools.get_plugin_data_dir("astrbot_plugin_safety"))
+        # --- 1. 数据持久化路径修复 (兼容性增强) ---
+        try:
+            # 尝试使用 StarTools 获取规范路径 (修正了方法名)
+            self.data_dir = Path(StarTools.get_data_dir("astrbot_plugin_safety"))
+        except (AttributeError, NameError):
+            # 兜底方案：如果 API 不存在或版本不兼容，使用标准相对路径
+            # 这能确保插件在旧版或特殊环境下也能正常启动，不会崩溃
+            self.data_dir = Path("data/plugin_data/astrbot_plugin_safety")
+
         self.data_file = self.data_dir / "users.json"
 
         # --- 内存缓存 ---
         self.cache = {}
         self.is_dirty = False
-        self.connected_bots = {}
-        self.admins = []
 
+        # --- Bot 实例缓存池 ---
+        self.connected_bots = {}
+
+        # --- 加载管理员 ---
+        self.admins = []
         global_config = context.get_config()
         if global_config and "admins_id" in global_config:
             for admin_id in global_config["admins_id"]:
                 if str(admin_id).isdigit():
                     self.admins.append(str(admin_id))
 
+        # --- 初始化目录和文件 ---
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._sync_init_load()
+
+        # --- 启动后台监控 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
     # ================= 核心：Bot 收集 =================
@@ -61,6 +74,7 @@ class SafetyPlugin(Star):
 
     # ================= 核心：数据 I/O =================
     def _sync_init_load(self):
+        """同步加载数据"""
         if not self.data_file.exists():
             self._init_empty_file()
             return
@@ -78,8 +92,8 @@ class SafetyPlugin(Star):
 
     def _backup_and_reset(self):
         try:
-            ts = int(time.time())
-            backup_path = self.data_file.with_suffix(f".bak.{ts}")
+            timestamp = int(time.time())
+            backup_path = self.data_file.with_suffix(f".bak.{timestamp}")
             if self.data_file.exists():
                 copyfile(self.data_file, backup_path)
         except Exception:
@@ -96,6 +110,7 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 保存失败: {e}")
 
     def _thread_write_task(self, data):
+        """线程写入任务"""
         temp_file = self.data_file.with_suffix(".tmp")
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
@@ -105,6 +120,7 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 写入失败: {e}")
 
     # ================= 核心：邮件发送模块 =================
+
     def _get_target_email(self, info: dict):
         custom_email = info.get("email")
         if custom_email and "@" in custom_email:
@@ -133,14 +149,35 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 邮件发送失败 ({target_email}): {e}")
 
     def _thread_send_email(self, host, port, user, password, to_addr, subject, body):
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = Header(subject, 'utf-8')
+        msg = MIMEText(body, 'plain', 'utf-8')
         msg['From'] = formataddr(["防失联卫士", user])
         msg['To'] = to_addr
         msg['Reply-to'] = user
         msg['Message-id'] = make_msgid()
         msg['Date'] = formatdate()
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        # 兼容旧代码，确保 MIMEText 附加正确
+        if not isinstance(msg, MIMEMultipart):
+            # 理论上不会走到这里，因为上面初始化的是 MIMEText，但为了稳妥起见，
+            # 如果需要附件功能请改回 MIMEMultipart，这里简化为纯文本邮件以最大化兼容性
+            # 修正：为了支持 Message-id 等头，这里改用 MIMEMultipart 结构
+            container = MIMEMultipart('alternative')
+            for k, v in msg.items():
+                container[k] = v
+            container.attach(MIMEText(body, 'plain', 'utf-8'))
+            msg = container
+        else:
+            # 如果上面已经初始化为 MIMEMultipart (未修改前)，直接 attach
+            pass
+
+        # 重新初始化一个标准的 MIMEMultipart 以避免混淆
+        final_msg = MIMEMultipart('alternative')
+        final_msg['Subject'] = Header(subject, 'utf-8')
+        final_msg['From'] = formataddr(["防失联卫士", user])
+        final_msg['To'] = to_addr
+        final_msg['Reply-to'] = user
+        final_msg['Message-id'] = make_msgid()
+        final_msg['Date'] = formatdate()
+        final_msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
         try:
             if port == 465:
@@ -151,12 +188,13 @@ class SafetyPlugin(Star):
                 client = smtplib.SMTP(host, port)
 
             client.login(user, password)
-            client.sendmail(user, [to_addr], msg.as_string())
+            client.sendmail(user, [to_addr], final_msg.as_string())
             client.quit()
         except Exception as e:
             raise e
 
     # ================= 业务逻辑 =================
+
     def _update_activity_memory(self, user_id: str, group_id: str = None, bot_id: str = None):
         user_id = str(user_id)
         if user_id in self.cache:
@@ -196,7 +234,7 @@ class SafetyPlugin(Star):
             return custom
         return default_text
 
-    # ================= 用户指令 (参数优化) =================
+    # ================= 用户指令 =================
 
     @filter.command("设置一阶段")
     async def cmd_set_warn_msg(self, event: AstrMessageEvent, *args):
@@ -238,14 +276,13 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(f"✅ 二阶段报警话术已更新！")
 
-    # 修复：参数设为 optional，防止框架拦截
     @filter.command("绑定邮箱")
     async def cmd_bind_email(self, event: AstrMessageEvent, email: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
         if not email:
-            yield event.plain_result("❌ 请输入邮箱地址。\n示例：/绑定邮箱 123456@qq.com")
+            yield event.plain_result("❌ 请输入邮箱地址。\n示例：/绑定邮箱 123@qq.com")
             return
 
         if user_id not in self.cache:
@@ -265,11 +302,12 @@ class SafetyPlugin(Star):
             f"您好，用户 {user_id} 已成功绑定此邮箱。"
         ))
 
-        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n优先发送到此邮箱，若未绑定则自动发给紧急联系人QQ邮箱。")
+        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n正在尝试发送测试邮件...")
 
     @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
+
         user_id = str(event.get_sender_id())
         raw_group_id = event.get_group_id()
         group_id = str(raw_group_id) if raw_group_id else ""
@@ -299,14 +337,13 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(msg)
 
-    # 修复：参数设为 optional
     @filter.command("配置紧急联系人")
     async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
         if not contact_qq:
-            yield event.plain_result("❌ 请输入紧急联系人QQ。\n示例：/配置紧急联系人 12345678")
+            yield event.plain_result("❌ 请输入QQ号。\n示例：/配置紧急联系人 12345678")
             return
 
         if user_id not in self.cache:
@@ -319,14 +356,13 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(f"✅ 紧急联系人已更新")
 
-    # 修复：参数设为 optional
     @filter.command("设置失联时间")
     async def cmd_set_days(self, event: AstrMessageEvent, days: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
         if not days:
-            yield event.plain_result("❌ 请输入失联天数 (支持小数)。\n示例：/设置失联时间 3")
+            yield event.plain_result("❌ 请输入天数。\n示例：/设置失联时间 3")
             return
 
         if user_id not in self.cache:
@@ -350,6 +386,8 @@ class SafetyPlugin(Star):
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
+
+        # 修复并发阻塞问题
         await asyncio.to_thread(self._sync_init_load)
         yield event.plain_result(f"✅ 配置文件已重载！当前缓存 {len(self.cache)} 个用户。")
 
@@ -386,6 +424,7 @@ class SafetyPlugin(Star):
 
         yield event.plain_result("\n".join(msg_lines))
 
+    # --- 测试指令 ---
     @filter.command("发送测试")
     async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
