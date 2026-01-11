@@ -218,7 +218,8 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        message = " ".join(args).strip()
+        # 使用 map(str, args) 确保所有参数转为字符串
+        message = " ".join(map(str, args)).strip()
         if not message:
             current = self.cache[user_id].get("custom_warn_msg", "（默认）")
             if not current: current = "（默认）"
@@ -238,7 +239,8 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        message = " ".join(args).strip()
+        # 使用 map(str, args) 确保所有参数转为字符串
+        message = " ".join(map(str, args)).strip()
         if not message:
             current = self.cache[user_id].get("custom_emerg_msg", "（默认）")
             if not current: current = "（默认）"
@@ -250,13 +252,17 @@ class SafetyPlugin(Star):
         yield event.plain_result(f"✅ 二阶段报警话术已更新！")
 
     @filter.command("绑定邮箱")
-    async def cmd_bind_email(self, event: AstrMessageEvent, email: str = None):
+    async def cmd_bind_email(self, event: AstrMessageEvent, *args):
+        # 使用 *args 接收，手动处理第一个参数
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not email:
+        if not args:
             yield event.plain_result("❌ 请输入邮箱地址。\n示例：/绑定邮箱 123@qq.com")
             return
+
+        # 强制转换为字符串
+        email = str(args[0])
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
@@ -266,7 +272,7 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 邮箱格式不正确。")
             return
 
-        self.cache[user_id]["email"] = str(email)
+        self.cache[user_id]["email"] = email
         await self._async_save_users()
 
         asyncio.create_task(self._async_send_email(
@@ -311,38 +317,49 @@ class SafetyPlugin(Star):
         yield event.plain_result(msg)
 
     @filter.command("配置紧急联系人")
-    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str = None):
+    async def cmd_set_contact(self, event: AstrMessageEvent, *args):
+        # 彻底解决 int 报错：使用 *args 接收参数
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not contact_qq:
+        if not args:
             yield event.plain_result("❌ 请输入QQ号。\n示例：/配置紧急联系人 12345678")
             return
+
+        # 获取第一个参数，并强制转为 str
+        contact_qq = str(args[0])
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
+
+        # 此时 contact_qq 绝对是 str，isdigit() 绝对可用
         if not contact_qq.isdigit():
             yield event.plain_result("❌ QQ号必须是纯数字")
             return
-        self.cache[user_id]["emergency_contact"] = str(contact_qq)
+
+        self.cache[user_id]["emergency_contact"] = contact_qq
         await self._async_save_users()
         yield event.plain_result(f"✅ 紧急联系人已更新")
 
     @filter.command("设置失联时间")
-    async def cmd_set_days(self, event: AstrMessageEvent, days: str = None):
+    async def cmd_set_days(self, event: AstrMessageEvent, *args):
+        # 彻底解决参数类型问题
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not days:
+        if not args:
             yield event.plain_result("❌ 请输入天数。\n示例：/设置失联时间 3")
             return
+
+        # 强制转为 str 后再转 float
+        days_str = str(args[0])
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
         try:
-            days_float = float(days)
+            days_float = float(days_str)
             if days_float <= 0: raise ValueError
         except ValueError:
             yield event.plain_result("❌ 请输入有效数字")
@@ -399,14 +416,16 @@ class SafetyPlugin(Star):
 
     # --- 测试指令 ---
     @filter.command("发送测试")
-    async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
+    async def cmd_admin_test(self, event: AstrMessageEvent, *args):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         sender_id = str(event.get_sender_id())
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
 
-        target_id = str(target_qq) if target_qq else sender_id
+        target_qq = str(args[0]) if args else None
+        target_id = target_qq if target_qq else sender_id
+
         if target_id not in self.cache:
             yield event.plain_result(f"❌ 用户 {target_id} 未注册。")
             return
