@@ -17,14 +17,19 @@ from astrbot.api.event import filter
 from astrbot.api import logger
 
 
-@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.6")
+@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.7")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        self.data_dir = Path(os.getcwd()) / "data" / "plugin_data" / "astrbot_plugin_safety"
+        try:
+            plugin_data_root = Path(context.get_data_dir())
+        except Exception:
+            plugin_data_root = Path(os.getcwd()) / "data"
+
+        self.data_dir = plugin_data_root / "plugin_data" / "astrbot_plugin_safety"
         self.data_file = self.data_dir / "users.json"
 
         # --- 内存缓存 ---
@@ -42,8 +47,7 @@ class SafetyPlugin(Star):
                 if str(admin_id).isdigit():
                     self.admins.append(str(admin_id))
 
-        # --- 初始化目录和文件 ---
-        # 自动创建文件夹，防止报错
+        # 自动创建文件夹
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -211,6 +215,7 @@ class SafetyPlugin(Star):
 
     @filter.command("设置一阶段")
     async def cmd_set_warn_msg(self, event: AstrMessageEvent, *args):
+        # *args 这里通常是安全的，因为通常输入的是文本
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
@@ -218,7 +223,6 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        # 使用 map(str, args) 确保所有参数转为字符串
         message = " ".join(map(str, args)).strip()
         if not message:
             current = self.cache[user_id].get("custom_warn_msg", "（默认）")
@@ -239,7 +243,6 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        # 使用 map(str, args) 确保所有参数转为字符串
         message = " ".join(map(str, args)).strip()
         if not message:
             current = self.cache[user_id].get("custom_emerg_msg", "（默认）")
@@ -252,17 +255,16 @@ class SafetyPlugin(Star):
         yield event.plain_result(f"✅ 二阶段报警话术已更新！")
 
     @filter.command("绑定邮箱")
-    async def cmd_bind_email(self, event: AstrMessageEvent, *args):
-        # 使用 *args 接收，手动处理第一个参数
+    async def cmd_bind_email(self, event: AstrMessageEvent, email: str = None):
+        # 恢复显式参数，但强制转换为str
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not args:
+        if not email:
             yield event.plain_result("❌ 请输入邮箱地址。\n示例：/绑定邮箱 123@qq.com")
             return
 
-        # 强制转换为字符串
-        email = str(args[0])
+        email = str(email)  # 强制转字符串
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
@@ -317,23 +319,27 @@ class SafetyPlugin(Star):
         yield event.plain_result(msg)
 
     @filter.command("配置紧急联系人")
-    async def cmd_set_contact(self, event: AstrMessageEvent, *args):
-        # 彻底解决 int 报错：使用 *args 接收参数
+    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str = None):
+        """
+        修复说明：
+        1. 恢复 explicit argument `contact_qq` 以避免 _empty() 错误。
+        2. 显式声明类型 `: str` 提示框架传入字符串。
+        3. 内部再次 `str(contact_qq)` 强制转换，防止框架传入 int 导致 .isdigit() 崩溃。
+        """
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not args:
+        if not contact_qq:
             yield event.plain_result("❌ 请输入QQ号。\n示例：/配置紧急联系人 12345678")
             return
 
-        # 获取第一个参数，并强制转为 str
-        contact_qq = str(args[0])
+        # 核心修复：不管传入的是 int 还是 str，统一转为 str
+        contact_qq = str(contact_qq)
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        # 此时 contact_qq 绝对是 str，isdigit() 绝对可用
         if not contact_qq.isdigit():
             yield event.plain_result("❌ QQ号必须是纯数字")
             return
@@ -343,23 +349,20 @@ class SafetyPlugin(Star):
         yield event.plain_result(f"✅ 紧急联系人已更新")
 
     @filter.command("设置失联时间")
-    async def cmd_set_days(self, event: AstrMessageEvent, *args):
-        # 彻底解决参数类型问题
+    async def cmd_set_days(self, event: AstrMessageEvent, days: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
-        if not args:
+        if not days:
             yield event.plain_result("❌ 请输入天数。\n示例：/设置失联时间 3")
             return
-
-        # 强制转为 str 后再转 float
-        days_str = str(args[0])
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
         try:
-            days_float = float(days_str)
+            # 强制转str再转float，兼容各种输入
+            days_float = float(str(days))
             if days_float <= 0: raise ValueError
         except ValueError:
             yield event.plain_result("❌ 请输入有效数字")
@@ -377,7 +380,6 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 权限不足。")
             return
 
-        # 修复并发阻塞问题
         await asyncio.to_thread(self._sync_init_load)
         yield event.plain_result(f"✅ 配置文件已重载！当前缓存 {len(self.cache)} 个用户。")
 
@@ -416,15 +418,15 @@ class SafetyPlugin(Star):
 
     # --- 测试指令 ---
     @filter.command("发送测试")
-    async def cmd_admin_test(self, event: AstrMessageEvent, *args):
+    async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         sender_id = str(event.get_sender_id())
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
 
-        target_qq = str(args[0]) if args else None
-        target_id = target_qq if target_qq else sender_id
+        # 强制转换为 str
+        target_id = str(target_qq) if target_qq else sender_id
 
         if target_id not in self.cache:
             yield event.plain_result(f"❌ 用户 {target_id} 未注册。")
