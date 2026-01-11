@@ -14,7 +14,6 @@ from email.utils import formataddr, make_msgid, formatdate
 
 from astrbot.api.all import *
 from astrbot.api.event import filter
-from astrbot.api.star import StarTools
 from astrbot.api import logger
 
 
@@ -25,15 +24,7 @@ class SafetyPlugin(Star):
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        # --- 1. 数据持久化路径修复 (兼容性增强) ---
-        try:
-            # 尝试使用 StarTools 获取规范路径 (修正了方法名)
-            self.data_dir = Path(StarTools.get_data_dir("astrbot_plugin_safety"))
-        except (AttributeError, NameError):
-            # 兜底方案：如果 API 不存在或版本不兼容，使用标准相对路径
-            # 这能确保插件在旧版或特殊环境下也能正常启动，不会崩溃
-            self.data_dir = Path("data/plugin_data/astrbot_plugin_safety")
-
+        self.data_dir = Path(os.getcwd()) / "data" / "plugin_data" / "astrbot_plugin_safety"
         self.data_file = self.data_dir / "users.json"
 
         # --- 内存缓存 ---
@@ -52,6 +43,7 @@ class SafetyPlugin(Star):
                     self.admins.append(str(admin_id))
 
         # --- 初始化目录和文件 ---
+        # 自动创建文件夹，防止报错
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,35 +141,16 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 邮件发送失败 ({target_email}): {e}")
 
     def _thread_send_email(self, host, port, user, password, to_addr, subject, body):
-        msg = MIMEText(body, 'plain', 'utf-8')
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = Header(subject, 'utf-8')
         msg['From'] = formataddr(["防失联卫士", user])
         msg['To'] = to_addr
         msg['Reply-to'] = user
         msg['Message-id'] = make_msgid()
         msg['Date'] = formatdate()
-        # 兼容旧代码，确保 MIMEText 附加正确
-        if not isinstance(msg, MIMEMultipart):
-            # 理论上不会走到这里，因为上面初始化的是 MIMEText，但为了稳妥起见，
-            # 如果需要附件功能请改回 MIMEMultipart，这里简化为纯文本邮件以最大化兼容性
-            # 修正：为了支持 Message-id 等头，这里改用 MIMEMultipart 结构
-            container = MIMEMultipart('alternative')
-            for k, v in msg.items():
-                container[k] = v
-            container.attach(MIMEText(body, 'plain', 'utf-8'))
-            msg = container
-        else:
-            # 如果上面已经初始化为 MIMEMultipart (未修改前)，直接 attach
-            pass
 
-        # 重新初始化一个标准的 MIMEMultipart 以避免混淆
-        final_msg = MIMEMultipart('alternative')
-        final_msg['Subject'] = Header(subject, 'utf-8')
-        final_msg['From'] = formataddr(["防失联卫士", user])
-        final_msg['To'] = to_addr
-        final_msg['Reply-to'] = user
-        final_msg['Message-id'] = make_msgid()
-        final_msg['Date'] = formatdate()
-        final_msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        text_part = MIMEText(body, 'plain', 'utf-8')
+        msg.attach(text_part)
 
         try:
             if port == 465:
@@ -188,7 +161,7 @@ class SafetyPlugin(Star):
                 client = smtplib.SMTP(host, port)
 
             client.login(user, password)
-            client.sendmail(user, [to_addr], final_msg.as_string())
+            client.sendmail(user, [to_addr], msg.as_string())
             client.quit()
         except Exception as e:
             raise e
@@ -302,7 +275,7 @@ class SafetyPlugin(Star):
             f"您好，用户 {user_id} 已成功绑定此邮箱。"
         ))
 
-        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n正在尝试发送测试邮件...")
+        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n优先发送到此邮箱，若未绑定则自动发给紧急联系人QQ邮箱。")
 
     @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
