@@ -18,38 +18,33 @@ from astrbot.api.star import StarTools
 from astrbot.api import logger
 
 
-@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.5")
+@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.6")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        self.data_dir = Path(StarTools.get_data_dir("astrbot_plugin_safety"))
+        # 获取插件标准数据存储目录
+        self.data_dir = Path(StarTools.get_plugin_data_dir("astrbot_plugin_safety"))
         self.data_file = self.data_dir / "users.json"
 
         # --- 内存缓存 ---
         self.cache = {}
         self.is_dirty = False
-
-        # --- Bot 实例缓存池 ---
         self.connected_bots = {}
-
-        # --- 加载管理员 ---
         self.admins = []
+
         global_config = context.get_config()
         if global_config and "admins_id" in global_config:
             for admin_id in global_config["admins_id"]:
                 if str(admin_id).isdigit():
                     self.admins.append(str(admin_id))
 
-        # --- 初始化目录和文件 ---
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._sync_init_load()
-
-        # --- 启动后台监控 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
     # ================= 核心：Bot 收集 =================
@@ -66,12 +61,10 @@ class SafetyPlugin(Star):
 
     # ================= 核心：数据 I/O =================
     def _sync_init_load(self):
-        """同步加载数据 (初始化时或通过线程池调用)"""
         if not self.data_file.exists():
             self._init_empty_file()
             return
         try:
-            # 这里的同步读取 open() 在 reload 时需配合 to_thread 使用
             with open(self.data_file, "r", encoding="utf-8") as f:
                 self.cache = json.load(f)
         except Exception as e:
@@ -85,8 +78,8 @@ class SafetyPlugin(Star):
 
     def _backup_and_reset(self):
         try:
-            timestamp = int(time.time())
-            backup_path = self.data_file.with_suffix(f".bak.{timestamp}")
+            ts = int(time.time())
+            backup_path = self.data_file.with_suffix(f".bak.{ts}")
             if self.data_file.exists():
                 copyfile(self.data_file, backup_path)
         except Exception:
@@ -103,7 +96,6 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 保存失败: {e}")
 
     def _thread_write_task(self, data):
-        """线程写入任务"""
         temp_file = self.data_file.with_suffix(".tmp")
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
@@ -113,7 +105,6 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 写入失败: {e}")
 
     # ================= 核心：邮件发送模块 =================
-
     def _get_target_email(self, info: dict):
         custom_email = info.get("email")
         if custom_email and "@" in custom_email:
@@ -149,9 +140,7 @@ class SafetyPlugin(Star):
         msg['Reply-to'] = user
         msg['Message-id'] = make_msgid()
         msg['Date'] = formatdate()
-
-        text_part = MIMEText(body, 'plain', 'utf-8')
-        msg.attach(text_part)
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
         try:
             if port == 465:
@@ -168,7 +157,6 @@ class SafetyPlugin(Star):
             raise e
 
     # ================= 业务逻辑 =================
-
     def _update_activity_memory(self, user_id: str, group_id: str = None, bot_id: str = None):
         user_id = str(user_id)
         if user_id in self.cache:
@@ -208,7 +196,7 @@ class SafetyPlugin(Star):
             return custom
         return default_text
 
-    # ================= 用户指令 =================
+    # ================= 用户指令 (参数优化) =================
 
     @filter.command("设置一阶段")
     async def cmd_set_warn_msg(self, event: AstrMessageEvent, *args):
@@ -250,10 +238,15 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(f"✅ 二阶段报警话术已更新！")
 
+    # 修复：参数设为 optional，防止框架拦截
     @filter.command("绑定邮箱")
-    async def cmd_bind_email(self, event: AstrMessageEvent, email: str):
+    async def cmd_bind_email(self, event: AstrMessageEvent, email: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
+
+        if not email:
+            yield event.plain_result("❌ 请输入邮箱地址。\n示例：/绑定邮箱 123456@qq.com")
+            return
 
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
@@ -274,12 +267,9 @@ class SafetyPlugin(Star):
 
         yield event.plain_result(f"✅ 邮箱已绑定: {email}\n优先发送到此邮箱，若未绑定则自动发给紧急联系人QQ邮箱。")
 
-    # ================= 常规指令 =================
-
     @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
-
         user_id = str(event.get_sender_id())
         raw_group_id = event.get_group_id()
         group_id = str(raw_group_id) if raw_group_id else ""
@@ -309,10 +299,16 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(msg)
 
+    # 修复：参数设为 optional
     @filter.command("配置紧急联系人")
-    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str):
+    async def cmd_set_contact(self, event: AstrMessageEvent, contact_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
+
+        if not contact_qq:
+            yield event.plain_result("❌ 请输入紧急联系人QQ。\n示例：/配置紧急联系人 12345678")
+            return
+
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
@@ -323,10 +319,16 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(f"✅ 紧急联系人已更新")
 
+    # 修复：参数设为 optional
     @filter.command("设置失联时间")
-    async def cmd_set_days(self, event: AstrMessageEvent, days: str):
+    async def cmd_set_days(self, event: AstrMessageEvent, days: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
+
+        if not days:
+            yield event.plain_result("❌ 请输入失联天数 (支持小数)。\n示例：/设置失联时间 3")
+            return
+
         if user_id not in self.cache:
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
@@ -348,9 +350,6 @@ class SafetyPlugin(Star):
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
-
-        # 2. 修复并发阻塞问题
-        # 使用 asyncio.to_thread 在独立线程中执行同步的文件读取操作
         await asyncio.to_thread(self._sync_init_load)
         yield event.plain_result(f"✅ 配置文件已重载！当前缓存 {len(self.cache)} 个用户。")
 
@@ -387,7 +386,6 @@ class SafetyPlugin(Star):
 
         yield event.plain_result("\n".join(msg_lines))
 
-    # --- 测试指令 ---
     @filter.command("发送测试")
     async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
