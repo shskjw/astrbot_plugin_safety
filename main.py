@@ -16,10 +16,6 @@ from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.api import logger
 
-# 数据存储路径
-DATA_DIR = Path("data/plugin_data/astrbot_plugin_safety")
-DATA_FILE = DATA_DIR / "users.json"
-
 
 @register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.5")
 class SafetyPlugin(Star):
@@ -28,25 +24,35 @@ class SafetyPlugin(Star):
         self.config = config
         self.check_interval = config.get("check_interval", 3600)
 
-        # 缓存
+        # --- 1. 数据持久化路径 (动态构建) ---
+        # 获取当前插件文件夹名称 (例如 astrbot_plugin_safety)
+        plugin_folder_name = Path(__file__).parent.name
+        # 构建标准数据目录: data/plugin_data/astrbot_plugin_safety
+        self.data_dir = Path("data/plugin_data") / plugin_folder_name
+        self.data_file = self.data_dir / "users.json"
+
+        # --- 内存缓存 ---
         self.cache = {}
         self.is_dirty = False
-        self.connected_bots = {}
-        self.admins = []
 
-        # 加载管理员
+        # --- Bot 实例缓存池 ---
+        self.connected_bots = {}
+
+        # --- 加载管理员 ---
+        self.admins = []
         global_config = context.get_config()
         if global_config and "admins_id" in global_config:
             for admin_id in global_config["admins_id"]:
                 if str(admin_id).isdigit():
                     self.admins.append(str(admin_id))
 
-        # 初始化
-        if not DATA_DIR.exists():
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # --- 初始化目录和文件 ---
+        if not self.data_dir.exists():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+
         self._sync_init_load()
 
-        # 启动监控
+        # --- 启动后台监控 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
 
     # ================= 核心：Bot 收集 =================
@@ -63,27 +69,28 @@ class SafetyPlugin(Star):
 
     # ================= 核心：数据 I/O =================
     def _sync_init_load(self):
-        if not DATA_FILE.exists():
+        """同步加载数据"""
+        if not self.data_file.exists():
             self._init_empty_file()
             return
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
+            with open(self.data_file, "r", encoding="utf-8") as f:
                 self.cache = json.load(f)
         except Exception as e:
             logger.error(f"[Safety] 数据文件读取失败: {e}")
             self._backup_and_reset()
 
     def _init_empty_file(self):
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+        with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump({}, f)
         self.cache = {}
 
     def _backup_and_reset(self):
         try:
-            ts = int(time.time())
-            backup_path = DATA_FILE.with_suffix(f".bak.{ts}")
-            if DATA_FILE.exists():
-                copyfile(DATA_FILE, backup_path)
+            timestamp = int(time.time())
+            backup_path = self.data_file.with_suffix(f".bak.{timestamp}")
+            if self.data_file.exists():
+                copyfile(self.data_file, backup_path)
         except Exception:
             pass
         self._init_empty_file()
@@ -98,15 +105,16 @@ class SafetyPlugin(Star):
             logger.error(f"[Safety] 保存失败: {e}")
 
     def _thread_write_task(self, data):
-        temp_file = DATA_FILE.with_suffix(".tmp")
+        """线程写入任务"""
+        temp_file = self.data_file.with_suffix(".tmp")
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            os.replace(temp_file, DATA_FILE)
+            os.replace(temp_file, self.data_file)
         except Exception as e:
             logger.error(f"[Safety] 写入失败: {e}")
 
-    # ================= 核心：邮件发送模块 (双模式兼容) =================
+    # ================= 核心：邮件发送模块 =================
 
     def _get_target_email(self, info: dict):
         custom_email = info.get("email")
@@ -123,25 +131,24 @@ class SafetyPlugin(Star):
 
         smtp_conf = user_info.get("smtp_override", {})
         host = smtp_conf.get("host", self.config.get("smtp_host", "smtpdm.aliyun.com"))
-        port = int(smtp_conf.get("port", self.config.get("smtp_port", 465)))  # 确保是int
-        user = smtp_conf.get("user", self.config.get("smtp_user", ""))
-        password = smtp_conf.get("pass", self.config.get("smtp_pass", ""))
+        port = int(smtp_conf.get("port", self.config.get("smtp_port", 465)))
+        user = smtp_conf.get("user", self.config.get("smtp_user", "are-you-still-alive@x.mizhoubaobei.top"))
+        password = smtp_conf.get("pass", self.config.get("smtp_pass", "ZM13199@%"))
 
         try:
             await asyncio.to_thread(self._thread_send_email, host, port, user, password, target_email, subject, body)
             logger.info(f"[Safety] 邮件已发送至 {target_email}")
         except smtplib.SMTPAuthenticationError:
-            logger.error(f"[Safety] 邮件认证失败！请检查 _conf_schema.json 中的账号({user})和SMTP密码。")
+            logger.error(f"[Safety] 邮件认证失败！请检查配置账号({user})和密码。")
         except Exception as e:
             logger.error(f"[Safety] 邮件发送失败 ({target_email}): {e}")
 
     def _thread_send_email(self, host, port, user, password, to_addr, subject, body):
-        # 1. 构建邮件
         msg = MIMEMultipart('alternative')
         msg['Subject'] = Header(subject, 'utf-8')
         msg['From'] = formataddr(["防失联卫士", user])
         msg['To'] = to_addr
-        msg['Reply-to'] = user  # 增加 Reply-to，符合 Demo 规范
+        msg['Reply-to'] = user
         msg['Message-id'] = make_msgid()
         msg['Date'] = formatdate()
 
@@ -149,24 +156,16 @@ class SafetyPlugin(Star):
         msg.attach(text_part)
 
         try:
-            # 2. 根据端口判断连接模式
-            # 端口 465 -> SSL 模式 (需要 context 修复)
             if port == 465:
                 context = ssl.create_default_context()
                 context.set_ciphers('DEFAULT')
                 client = smtplib.SMTP_SSL(host, port, context=context)
-
-            # 端口 80/25 -> 普通模式 (Demo 默认方式)
             else:
                 client = smtplib.SMTP(host, port)
-                # client.starttls() # 阿里云 DM 端口 80 通常不需要 starttls，直接 login
 
-            # 3. 登录发送
-            # client.set_debuglevel(1) # 调试时可开启
             client.login(user, password)
             client.sendmail(user, [to_addr], msg.as_string())
             client.quit()
-
         except Exception as e:
             raise e
 
@@ -275,13 +274,14 @@ class SafetyPlugin(Star):
             f"您好，用户 {user_id} 已成功绑定此邮箱。"
         ))
 
-        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n正在尝试发送测试邮件...")
+        yield event.plain_result(f"✅ 邮箱已绑定: {email}\n优先发送到此邮箱，若未绑定则自动发给紧急联系人QQ邮箱。")
 
     # ================= 常规指令 =================
 
     @filter.command("注册又活一天")
     async def cmd_register(self, event: AstrMessageEvent):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
+
         user_id = str(event.get_sender_id())
         raw_group_id = event.get_group_id()
         group_id = str(raw_group_id) if raw_group_id else ""
@@ -300,7 +300,7 @@ class SafetyPlugin(Star):
                 "custom_warn_msg": "",
                 "custom_emerg_msg": ""
             }
-            msg = "✅ 注册成功！\n请发送 /配置紧急联系人 [QQ号]\n(可选) /绑定邮箱（默认qq邮箱）\n/设置失联时间 x天"
+            msg = "✅ 注册成功！\n请发送 /配置紧急联系人 [QQ号]\n(可选) /绑定邮箱"
         else:
             self.cache[user_id]["last_active"] = time.time()
             self.cache[user_id]["alert_level"] = 0
@@ -350,7 +350,10 @@ class SafetyPlugin(Star):
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
-        self._sync_init_load()
+
+        # 2. 修复并发阻塞问题
+        # 使用 asyncio.to_thread 在独立线程中执行同步的文件读取操作
+        await asyncio.to_thread(self._sync_init_load)
         yield event.plain_result(f"✅ 配置文件已重载！当前缓存 {len(self.cache)} 个用户。")
 
     @filter.command("安全监控列表")
@@ -367,9 +370,6 @@ class SafetyPlugin(Star):
         for uid, info in self.cache.items():
             diff = now - info.get("last_active", 0)
             level = info.get("alert_level", 0)
-
-            has_custom_warn = "✏️" if info.get("custom_warn_msg") else ""
-            has_custom_emerg = "✏️" if info.get("custom_emerg_msg") else ""
             target_mail = self._get_target_email(info) or "无"
 
             if level == 0:
@@ -383,7 +383,7 @@ class SafetyPlugin(Star):
                 f"{status} 用户: {uid}\n"
                 f"   ├ 失联: {self._format_duration(diff)}\n"
                 f"   ├ 邮箱: {target_mail}\n"
-                f"   └ 话术: {has_custom_warn}{has_custom_emerg}"
+                f"   └ 话术: {'✏️' if info.get('custom_warn_msg') or info.get('custom_emerg_msg') else ''}"
             )
             msg_lines.append(line)
 
@@ -394,7 +394,6 @@ class SafetyPlugin(Star):
     async def cmd_admin_test(self, event: AstrMessageEvent, target_qq: str = None):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         sender_id = str(event.get_sender_id())
-
         if sender_id not in self.admins:
             yield event.plain_result("❌ 权限不足。")
             return
@@ -412,7 +411,6 @@ class SafetyPlugin(Star):
 
         msg_text = self._get_msg_content(info, "emerg", f"🚨 [测试] 用户 {target_id} 正在测试失联报警。")
 
-        # 1. 邮件
         target_email = self._get_target_email(info)
         if target_email:
             asyncio.create_task(self._async_send_email(
@@ -426,20 +424,16 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 找不到Bot，无法发送QQ消息。")
             return
 
-        # 2. 私聊 -> 用户
         await self._send_private_raw(bot, target_id, msg_text + "\n(测试：发给用户)")
         yield event.plain_result(f"✅ 私聊已发送 -> 用户本人")
 
-        # 3. 联系人
         contact_id = info.get("emergency_contact")
         group_id = info.get("group_id")
 
         if contact_id:
-            # 私聊 -> 联系人
             await self._send_private_raw(bot, contact_id, msg_text + "\n(测试：发给联系人)")
             yield event.plain_result(f"✅ 私聊已发送 -> 紧急联系人")
 
-            # 群聊 -> 艾特用户+联系人
             if group_id:
                 chain = [
                     {"type": "at", "data": {"qq": target_id}},
@@ -553,21 +547,18 @@ class SafetyPlugin(Star):
                     raw_msg = self._get_msg_content(info, "emerg", default_emerg)
                     msg_text = raw_msg.replace("{uid}", uid).replace("{time}", time_desc)
 
-                    # 1. 发邮件
                     if self._get_target_email(info):
                         await self._async_send_email(info, f"【紧急】用户 {uid} 失联警报",
                                                      f"系统检测到用户已失联 {time_desc}。\n\n报警内容：\n{msg_text}")
 
                     if bot:
-                        # 必发: 私聊用户本人
                         await self._send_private_raw(bot, uid, msg_text + "\n(已触发紧急联系流程)")
 
-                        # 发给联系人
                         if contact_id:
                             is_in_group = await self._check_user_in_group(bot, info.get("group_id"), contact_id)
-                            # 私聊联系人
+                            # 私聊
                             await self._send_private_raw(bot, contact_id, msg_text + "\n(已在群内同步提醒)")
-                            # 群聊 @联系人
+                            # 群聊
                             if is_in_group:
                                 await self._send_group_at_raw(bot, info["group_id"], contact_id, msg_text)
                         else:
