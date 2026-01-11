@@ -429,7 +429,7 @@ class SafetyPlugin(Star):
         target_email = self._get_target_email(info)
         if target_email:
             asyncio.create_task(self._async_send_email(
-                info, "【防失联卫士】报警系统测试", f"测试邮件。\n报警内容：{msg_text}"
+                info, "【恭喜又活一天】报警系统测试", f"测试邮件。\n报警内容：{msg_text}"
             ))
             yield event.plain_result(f"📧 邮件已发送 -> {target_email}")
         else:
