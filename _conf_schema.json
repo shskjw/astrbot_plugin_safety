@@ -15,7 +15,7 @@
     "default": "🚨 [紧急求助] 用户 {uid} 已失联 {time}，请尝试联系！"
   },
   "smtp_host": {
-    "description": "SMTP服务器地址",
+    "description": "SMTP服务器地址 (阿里云邮件推送专用)",
     "type": "string",
     "default": "smtp.qiye.aliyun.com"
   },
@@ -27,11 +27,11 @@
   "smtp_user": {
     "description": "SMTP发件人邮箱账号",
     "type": "string",
-    "default": "are-you-still-alive@x.mizhoubaobei.top"
+    "default": ""
   },
   "smtp_pass": {
-    "description": "SMTP发件人密码/授权码",
+    "description": "SMTP密码",
     "type": "string",
-    "default": "ZM13199@%"
+    "default": ""
   }
 }
