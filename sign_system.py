@@ -12,24 +12,29 @@ class SignSystem:
     def __init__(self, data_dir: Path):
         self.data_file = data_dir / "checkins.json"
         self.holiday_cache_file = data_dir / "holidays.json"
-        self.data = {}
         self.holidays = {}
         self._load_data()
         self._load_holidays()
         
-        # 字体配置
-        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        self.font_path_text = current_dir / "fonts" / "text.ttf"
-        self.font_path_title = current_dir / "fonts" / "title.ttf"
-        
-        # 验证文件是否存在，如果不存在则回退
-        if not self.font_path_text.exists():
-             self.font_path_text = "C:/Windows/Fonts/msyh.ttc"
-             if not os.path.exists(str(self.font_path_text)):
-                 self.font_path_text = "C:/Windows/Fonts/msyh.ttf"
-        
-        if not self.font_path_title.exists():
-            self.font_path_title = self.font_path_text
+        # 字体查找列表 (优先级从高到低)
+        self.font_candidates = [
+            # 1. 用户自定义目录 (需确保是中文字体)
+            data_dir / "font.ttf",
+            data_dir / "font.ttc",
+            
+            # 2. 插件内置 (如果用户确定这是中文字体)
+            Path(os.path.dirname(os.path.abspath(__file__))) / "fonts" / "text.ttf",
+            
+            # 3. Windows 系统字体
+            Path("C:/Windows/Fonts/msyh.ttc"), # 微软雅黑
+            Path("C:/Windows/Fonts/msyh.ttf"),
+            Path("C:/Windows/Fonts/simhei.ttf"), # 黑体
+            Path("C:/Windows/Fonts/simsun.ttc"), # 宋体
+            
+            # 4. Linux 常见字体 (备选)
+            Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        ]
         
     def _load_data(self):
         if self.data_file.exists():
@@ -160,6 +165,18 @@ class SignSystem:
         
         return True, f"补签成功！已为你补上 {target_str} 的卡。"
 
+    def _get_available_font(self, size: int):
+        """尝试加载可用的字体"""
+        for path in self.font_candidates:
+            if path.exists():
+                try:
+                    return ImageFont.truetype(str(path), size)
+                except Exception as e:
+                    print(f"Font load error: {path} - {e}")
+                    continue
+        # Fallback
+        return ImageFont.load_default()
+
     async def draw_calendar_image(self, user_id: str):
         """生成日历图片"""
         now = datetime.now()
@@ -192,22 +209,11 @@ class SignSystem:
         image = Image.new('RGB', (width, height), bg_color)
         draw = ImageDraw.Draw(image)
         
-        try:
-            # 增大字体大小 40->60, 30->40
-            # 再次调大数字字体 60 -> 72
-            font_path = str(self.font_path_text)
-            title_font_path = str(self.font_path_title)
-            
-            font_large = ImageFont.truetype(title_font_path, 72) # 数字/标题用 Title 字体
-            font_medium = ImageFont.truetype(font_path, 40)      # 星期用 Text 字体
-            font_small = ImageFont.truetype(font_path, 30)
-            font_holiday = ImageFont.truetype(font_path, 20)
-        except:
-             # Fallback if font load fails
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-            font_holiday = ImageFont.load_default()
+        # 加载字体
+        font_large = self._get_available_font(72)
+        font_medium = self._get_available_font(40)
+        font_small = self._get_available_font(30)
+        font_holiday = self._get_available_font(20)
 
         # 1. 绘制顶部 202x年x月
         title_text = f"{year}年{month}月"
