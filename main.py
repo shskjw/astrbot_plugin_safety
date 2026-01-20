@@ -58,8 +58,8 @@ class SafetyPlugin(Star):
     @command("打卡")
     async def sign_in_command(self, event: AstrMessageEvent):
         """每日打卡"""
-        user_id = event.sender.user_id
-        user_name = event.sender.nickname
+        user_id = event.get_sender_id()
+        user_name = event.get_sender_name()
         
         # 1. 执行打卡
         success, msg = self.sign_system.sign_in(user_id)
@@ -231,8 +231,8 @@ class SafetyPlugin(Star):
 
     # ================= 用户指令 =================
 
-    @filter.command("设置一阶段")
-    async def cmd_set_warn_msg(self, event: AstrMessageEvent, *args):
+    @command("设置一阶段")
+    async def cmd_set_warn_msg(self, event: AstrMessageEvent):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
@@ -240,7 +240,12 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        message = " ".join(map(str, args)).strip()
+        # 手动解析参数
+        raw_msg = event.message_str or ""
+        parts = raw_msg.split(maxsplit=1)
+        # parts[0] 是指令，parts[1] 是内容，如果存在
+        message = parts[1].strip() if len(parts) > 1 else ""
+
         if not message:
             current = self.cache[user_id].get("custom_warn_msg", "（默认）")
             if not current: current = "（默认）"
@@ -251,8 +256,8 @@ class SafetyPlugin(Star):
         await self._async_save_users()
         yield event.plain_result(f"✅ 一阶段预警话术已更新！")
 
-    @filter.command("设置二阶段")
-    async def cmd_set_emerg_msg(self, event: AstrMessageEvent, *args):
+    @command("设置二阶段")
+    async def cmd_set_emerg_msg(self, event: AstrMessageEvent):
         if hasattr(event, 'bot'): self._record_bot(event.bot)
         user_id = str(event.get_sender_id())
 
@@ -260,7 +265,11 @@ class SafetyPlugin(Star):
             yield event.plain_result("❌ 请先发送 /注册又活一天")
             return
 
-        message = " ".join(map(str, args)).strip()
+        # 手动解析参数
+        raw_msg = event.message_str or ""
+        parts = raw_msg.split(maxsplit=1)
+        message = parts[1].strip() if len(parts) > 1 else ""
+
         if not message:
             current = self.cache[user_id].get("custom_emerg_msg", "（默认）")
             if not current: current = "（默认）"
