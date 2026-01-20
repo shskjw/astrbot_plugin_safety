@@ -4,7 +4,7 @@ import calendar
 import aiohttp
 import asyncio
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
@@ -17,15 +17,19 @@ class SignSystem:
         self._load_data()
         self._load_holidays()
         
-        # 字体配置 - 优先使用本地 fonts 目录
+        # 字体配置
         current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         self.font_path_text = current_dir / "fonts" / "text.ttf"
+        self.font_path_title = current_dir / "fonts" / "title.ttf"
         
-        # 如果本地没有，尝试系统字体
+        # 验证文件是否存在，如果不存在则回退
         if not self.font_path_text.exists():
              self.font_path_text = "C:/Windows/Fonts/msyh.ttc"
-             if not os.path.exists(self.font_path_text):
+             if not os.path.exists(str(self.font_path_text)):
                  self.font_path_text = "C:/Windows/Fonts/msyh.ttf"
+        
+        if not self.font_path_title.exists():
+            self.font_path_title = self.font_path_text
         
     def _load_data(self):
         if self.data_file.exists():
@@ -87,7 +91,74 @@ class SignSystem:
             
         self.data[user_id].append(today)
         self._save_data()
-        return True, "打卡成功！"
+        return True, "打卡成功！恭喜你又活一天"
+
+    def supplement_sign_in(self, user_id: str, date_str: str = None):
+        """补签 logic"""
+        today = date.today()
+        user_id = str(user_id)
+        
+        # 1. 确定要补签的日期
+        target_date = None
+        if not date_str:
+            # 如果没指定日期，自动查找最近一天未签到的（昨天或前天）
+            # 优先补签昨天
+            yesterday = today - timedelta(days=1)
+            yesterday_str = yesterday.isoformat()
+            
+            user_logs = self.data.get(user_id, [])
+            if yesterday_str not in user_logs:
+                target_date = yesterday
+            else:
+                # 昨天签了，检查前天
+                before_yesterday = today - timedelta(days=2)
+                by_str = before_yesterday.isoformat()
+                if by_str not in user_logs:
+                     target_date = before_yesterday
+                else:
+                    return False, "这两天都已经打过卡了哦，无需补签~"
+        else:
+             # 指定日期
+            try:
+                # 兼容只传 'DD' 的情况
+                if len(date_str) <= 2 and date_str.isdigit():
+                    day_val = int(date_str)
+                    try:
+                        target_date = date(today.year, today.month, day_val)
+                    except ValueError:
+                        return False, "无效的日期，请检查是否超出当月天数"
+                else:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    target_date = dt
+            except ValueError:
+                return False, "日期格式错误，请使用 DD (如 19) 或 YYYY-MM-DD 格式"
+
+        if not target_date:
+            return False, "未知错误"
+
+        target_str = target_date.isoformat()
+        
+        # 2. 检查日期是否在允许范围内 (过去2天: 昨天、前天)
+        # allowed: [today-2, today-1]
+        diff = (today - target_date).days
+        if diff <= 0:
+             return False, "只能补签过去日期的卡哦~"
+        if diff > 2:
+             return False, "补签时间已过，只能补签最近两天的卡哦~"
+
+        # 3. 检查是否已签
+        if user_id not in self.data:
+            self.data[user_id] = []
+            
+        if target_str in self.data[user_id]:
+             return False, f"{target_str} 已经打过卡了~"
+
+        self.data[user_id].append(target_str)
+        # 排序一下日期，虽然不是必须的，但好看点
+        self.data[user_id].sort() 
+        self._save_data()
+        
+        return True, f"补签成功！已为你补上 {target_str} 的卡。"
 
     async def draw_calendar_image(self, user_id: str):
         """生成日历图片"""
@@ -123,9 +194,12 @@ class SignSystem:
         
         try:
             # 增大字体大小 40->60, 30->40
+            # 再次调大数字字体 60 -> 72
             font_path = str(self.font_path_text)
-            font_large = ImageFont.truetype(font_path, 60)
-            font_medium = ImageFont.truetype(font_path, 40)
+            title_font_path = str(self.font_path_title)
+            
+            font_large = ImageFont.truetype(title_font_path, 72) # 数字/标题用 Title 字体
+            font_medium = ImageFont.truetype(font_path, 40)      # 星期用 Text 字体
             font_small = ImageFont.truetype(font_path, 30)
             font_holiday = ImageFont.truetype(font_path, 20)
         except:

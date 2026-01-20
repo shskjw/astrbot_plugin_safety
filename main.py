@@ -74,6 +74,28 @@ class SafetyPlugin(Star):
         yield event.plain_result(f"{msg}")
         yield event.image_result(str(temp_img_path))
 
+    @command("补签")
+    async def cmd_supplement_sign(self, event: AstrMessageEvent):
+        """补签(最近两天)"""
+        user_id = event.get_sender_id()
+        
+        # 解析参数
+        raw_msg = event.message_str or ""
+        parts = raw_msg.split(maxsplit=1)
+        date_str = parts[1].strip() if len(parts) > 1 else None
+        
+        success, msg = self.sign_system.supplement_sign_in(user_id, date_str)
+        
+        if success:
+            # 补签成功后发送日历
+            image = await self.sign_system.draw_calendar_image(user_id)
+            temp_img_path = self.data_dir / f"temp_sign_{user_id}.png"
+            image.save(temp_img_path)
+            yield event.plain_result(msg)
+            yield event.image_result(str(temp_img_path))
+        else:
+            yield event.plain_result(f"❌ {msg}")
+
     # ================= 核心：Bot 收集 =================
     def _record_bot(self, bot):
         if bot and hasattr(bot, 'id'):
