@@ -17,11 +17,15 @@ class SignSystem:
         self._load_data()
         self._load_holidays()
         
-        # 字体配置 - 尝试加载微软雅黑
-        self.font_path = "C:/Windows/Fonts/msyh.ttc"
-        if not os.path.exists(self.font_path):
-            self.font_path = "C:/Windows/Fonts/msyh.ttf"
-        # 如果还找不到，可能需要用户提供 font.ttf 或者 fallback
+        # 字体配置 - 优先使用本地 fonts 目录
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        self.font_path_text = current_dir / "fonts" / "text.ttf"
+        
+        # 如果本地没有，尝试系统字体
+        if not self.font_path_text.exists():
+             self.font_path_text = "C:/Windows/Fonts/msyh.ttc"
+             if not os.path.exists(self.font_path_text):
+                 self.font_path_text = "C:/Windows/Fonts/msyh.ttf"
         
     def _load_data(self):
         if self.data_file.exists():
@@ -118,14 +122,18 @@ class SignSystem:
         draw = ImageDraw.Draw(image)
         
         try:
-            font_large = ImageFont.truetype(self.font_path, 40)
-            font_medium = ImageFont.truetype(self.font_path, 30)
-            font_small = ImageFont.truetype(self.font_path, 20)
+            # 增大字体大小 40->60, 30->40
+            font_path = str(self.font_path_text)
+            font_large = ImageFont.truetype(font_path, 60)
+            font_medium = ImageFont.truetype(font_path, 40)
+            font_small = ImageFont.truetype(font_path, 30)
+            font_holiday = ImageFont.truetype(font_path, 20)
         except:
              # Fallback if font load fails
             font_large = ImageFont.load_default()
             font_medium = ImageFont.load_default()
             font_small = ImageFont.load_default()
+            font_holiday = ImageFont.load_default()
 
         # 1. 绘制顶部 202x年x月
         title_text = f"{year}年{month}月"
@@ -185,10 +193,13 @@ class SignSystem:
                     
                     # 检查是否节假日/周末
                     is_off_day = False
+                    holiday_name = ""
                     # API check
                     if current_date_str in holidays_data:
-                        if holidays_data[current_date_str].get("isOffDay"):
+                        h_info = holidays_data[current_date_str]
+                        if h_info.get("isOffDay"):
                             is_off_day = True
+                        holiday_name = h_info.get("name", "")
                     else:
                         # Fallback: simple weekend check if no data
                         # weekday(): Mon=0, Sun=6
@@ -210,9 +221,24 @@ class SignSystem:
                     except:
                         dw, dh = draw.textsize(day_str, font=font_large)
                     
-                    # 稍微偏上的居中，给圆圈留空间
-                    draw.text((x + (cell_size - dw)/2, y + (cell_size - dh)/2 - 5), day_str, fill=num_color, font=font_large)
+                    # 稍微偏上的居中
+                    text_y_offset = (cell_size - dh)/2 - 5
+                    if holiday_name:
+                        text_y_offset -= 10 # 如果有节日名称，数字稍微往上挪一点
                     
+                    draw.text((x + (cell_size - dw)/2, y + text_y_offset), day_str, fill=num_color, font=font_large)
+                    
+                    # 绘制节日名称 (如果有)
+                    if holiday_name:
+                         try:
+                            bbox = draw.textbbox((0, 0), holiday_name, font=font_holiday)
+                            hw = bbox[2] - bbox[0]
+                            hh = bbox[3] - bbox[1]
+                         except:
+                            hw, hh = draw.textsize(holiday_name, font=font_holiday)
+                         
+                         draw.text((x + (cell_size - hw)/2, y + cell_size - hh - 5), holiday_name, fill=holidays_text_color, font=font_holiday)
+
                     # 如果打卡了，画个绿圈
                     if current_date_str in user_logs:
                         cx, cy = x + cell_size/2, y + cell_size/2
