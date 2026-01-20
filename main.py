@@ -15,6 +15,7 @@ from email.utils import formataddr, make_msgid, formatdate
 from astrbot.api.all import *
 from astrbot.api.event import filter
 from astrbot.api import logger
+from .sign_system import SignSystem
 
 
 @register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.7")
@@ -47,10 +48,31 @@ class SafetyPlugin(Star):
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
+        self.sign_system = SignSystem(self.data_dir)
+
         self._sync_init_load()
 
         # --- 启动后台监控 ---
         self.monitor_task = asyncio.create_task(self._monitor_loop())
+
+    @command("打卡")
+    async def sign_in_command(self, event: AstrMessageEvent):
+        """每日打卡"""
+        user_id = event.sender.user_id
+        user_name = event.sender.nickname
+        
+        # 1. 执行打卡
+        success, msg = self.sign_system.sign_in(user_id)
+        
+        # 2. 生成图片
+        image = await self.sign_system.draw_calendar_image(user_id)
+        
+        # 3. 保存临时文件
+        temp_img_path = self.data_dir / f"temp_sign_{user_id}.png"
+        image.save(temp_img_path)
+        
+        yield event.plain_result(f"{msg}")
+        yield event.image_result(str(temp_img_path))
 
     # ================= 核心：Bot 收集 =================
     def _record_bot(self, bot):
