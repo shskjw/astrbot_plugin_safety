@@ -18,7 +18,7 @@ from astrbot.api import logger
 from .sign_system import SignSystem
 
 
-@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.7")
+@register("astrbot_plugin_safety", "shskjw", "噢耶，今天又活一天", "1.0.8")
 class SafetyPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
